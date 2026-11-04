@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Backend test suite
+pytest>=8,<9
