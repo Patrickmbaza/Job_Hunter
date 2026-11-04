@@ -84,9 +84,10 @@ class JobRead(BaseModel):
 class JobSourceCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=160)
-    kind: str = Field(pattern="^(greenhouse|lever|rss)$")
+    kind: str = Field(pattern="^(greenhouse|lever|ashby|rss|career_page)$")
     board_slug: str | None = Field(default=None, min_length=1, max_length=160, pattern="^[A-Za-z0-9_.-]+$")
     feed_url: str | None = Field(default=None, max_length=2048)
+    page_url: str | None = Field(default=None, max_length=2048)
 
 
 class JobSearchRequest(BaseModel):
@@ -144,6 +145,7 @@ class JobSourceRead(BaseModel):
     kind: str
     board_slug: str | None
     feed_url: str | None
+    page_url: str | None
     active: bool
 
 

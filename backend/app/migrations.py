@@ -38,26 +38,30 @@ ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
 
 
 def upgrade_schema(engine: Engine) -> None:
-    """Apply version 1 using only missing-column ALTERs and a version marker."""
+    """Apply additive schema versions without replacing existing tables or rows."""
     with engine.begin() as connection:
         connection.exec_driver_sql(
             "CREATE TABLE IF NOT EXISTS schema_migrations "
             "(version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
         )
         applied = {row[0] for row in connection.exec_driver_sql("SELECT version FROM schema_migrations")}
-        if 1 in applied:
-            return
-        inspector = inspect(connection)
-        tables = set(inspector.get_table_names())
-        for table, definitions in ADDITIVE_COLUMNS.items():
-            if table not in tables:
+        migrations = {
+            1: ADDITIVE_COLUMNS,
+            3: {"job_sources": {"page_url": "VARCHAR(2048)"}},
+        }
+        for version, tables_to_upgrade in migrations.items():
+            if version in applied:
                 continue
-            existing = {column["name"] for column in inspector.get_columns(table)}
-            for name, definition in definitions.items():
-                if name not in existing:
-                    connection.exec_driver_sql(
-                        f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}'
-                    )
-        connection.exec_driver_sql(
-            "INSERT INTO schema_migrations(version) VALUES (1)"
-        )
+            for table, definitions in tables_to_upgrade.items():
+                inspector = inspect(connection)
+                if table not in inspector.get_table_names():
+                    continue
+                existing = {column["name"] for column in inspector.get_columns(table)}
+                for name, definition in definitions.items():
+                    if name not in existing:
+                        connection.exec_driver_sql(
+                            f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}'
+                        )
+            connection.exec_driver_sql(
+                "INSERT INTO schema_migrations(version) VALUES (?)", (version,)
+            )

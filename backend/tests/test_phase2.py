@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from docx import Document
 from reportlab.pdfgen.canvas import Canvas
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session
 
 from app.database import Base
@@ -17,7 +17,8 @@ from app.models import CVUpload
 from app.services.cv_parser import extract_text, parse_cv
 from app.services.cv_storage import store_cv
 from app.services.documents import build_documents, generate_files
-from app.services.job_sources import _greenhouse_items, _lever_items, normalize_job_url
+from app.services.job_sources import (_ashby_items, _career_page_items, _greenhouse_items, _lever_items,
+                                      normalize_job_url, validate_public_https_url)
 from app.services.matcher import score_job
 
 
@@ -94,6 +95,39 @@ def test_source_mapping_canonicalization_and_explainable_score():
     engine.dispose()
 
 
+def test_ashby_and_career_page_jsonld_mapping_and_public_url_validation():
+    ashby = JobSource(id=9, name="Example Ashby", kind="ashby", board_slug="example")
+    mapped = _ashby_items({"jobs": [
+        {"id": "listed", "isListed": True, "title": "Platform Engineer", "jobUrl": "https://jobs.ashbyhq.com/example/123",
+         "applyUrl": "https://jobs.ashbyhq.com/example/123/application", "location": "Remote - US",
+         "workplaceType": "Hybrid", "publishedAt": "2026-10-30T00:00:00Z", "employmentType": "FullTime",
+         "descriptionPlain": "Required: AWS Terraform Kubernetes", "compensation": {"summaryComponents": [
+             {"compensationType": "Salary", "currencyCode": "USD", "minValue": 100000, "maxValue": 140000}]}},
+        {"id": "hidden", "isListed": False, "title": "Hidden", "jobUrl": "https://jobs.ashbyhq.com/example/hidden"},
+    ]}, ashby)
+    assert len(mapped) == 1
+    assert mapped[0]["work_mode"] == "hybrid" and mapped[0]["salary_min"] == 100000
+    assert mapped[0]["company"] == "Example Ashby" and mapped[0]["posted_at"] is not None
+    assert mapped[0]["required_skills"] == ["AWS", "Terraform", "Kubernetes"]
+
+    page = JobSource(id=10, name="Configured Company", kind="career_page", page_url="https://careers.example.org/jobs")
+    html = b'''<html><script type="application/ld+json">{"@context":"https://schema.org","@graph":[
+    {"@type":"Organization","name":"Configured Company"},
+    {"@type":"JobPosting","title":"Cloud Engineer","url":"https://careers.example.org/cloud",
+    "identifier":{"value":"cloud-1"},"hiringOrganization":{"name":"Actual Company"},
+    "jobLocationType":"TELECOMMUTE","datePosted":"2026-10-31","validThrough":"2026-11-30",
+    "employmentType":"FULL_TIME","baseSalary":{"currency":"USD","value":{"minValue":90000,"maxValue":120000}},
+    "description":"<p>Required: AWS Terraform</p>"}]}</script><div>ignored text</div></html>'''
+    career = _career_page_items(html, page)
+    assert len(career) == 1 and career[0]["title"] == "Cloud Engineer"
+    assert career[0]["company"] == "Actual Company" and career[0]["work_mode"] == "remote"
+    assert career[0]["expires_at"] is not None and career[0]["salary_max"] == 120000
+    assert validate_public_https_url("https://careers.example.org/jobs") == "https://careers.example.org/jobs"
+    for url in ("http://example.org/jobs", "https://localhost/jobs", "https://127.0.0.1/jobs", "https://user:pass@example.org/jobs", "https://example.org:8443/jobs"):
+        with pytest.raises(ValueError):
+            validate_public_https_url(url)
+
+
 def test_document_generation_verified_only_and_versioned(tmp_path, monkeypatch):
     import app.services.documents as documents
 
@@ -135,6 +169,23 @@ def test_additive_migration_keeps_legacy_rows():
         assert row[:4] == ("My legacy title", "legacy summary", "unverified", "keep this")
         assert row[4] == "[]"
         assert connection.exec_driver_sql("SELECT COUNT(*) FROM schema_migrations WHERE version=1").scalar_one() == 1
+    engine.dispose()
+
+
+def test_source_page_url_migration_preserves_configured_sources():
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        connection.exec_driver_sql("INSERT INTO schema_migrations(version) VALUES (1)")
+        connection.exec_driver_sql("CREATE TABLE job_sources (id INTEGER PRIMARY KEY, name VARCHAR(160), kind VARCHAR(40), board_slug VARCHAR(160), feed_url VARCHAR(2048), active BOOLEAN, created_at DATETIME)")
+        connection.exec_driver_sql("INSERT INTO job_sources (id, name, kind, board_slug, feed_url, active) VALUES (12, 'Existing source', 'greenhouse', 'example', NULL, 1)")
+    upgrade_schema(engine)
+    upgrade_schema(engine)
+    with engine.connect() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("job_sources")}
+        row = connection.exec_driver_sql("SELECT name, board_slug, page_url FROM job_sources WHERE id=12").one()
+        assert "page_url" in columns and row == ("Existing source", "example", None)
+        assert connection.exec_driver_sql("SELECT COUNT(*) FROM schema_migrations WHERE version=3").scalar_one() == 1
     engine.dispose()
 
 

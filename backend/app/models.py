@@ -126,6 +126,7 @@ class JobSource(Base):
     kind: Mapped[str] = mapped_column(String(24), index=True)
     board_slug: Mapped[str | None] = mapped_column(String(160), nullable=True)
     feed_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    page_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 

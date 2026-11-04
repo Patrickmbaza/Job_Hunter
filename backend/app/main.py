@@ -35,7 +35,7 @@ from app.services.cv_parser import MAX_CV_BYTES
 from app.services.cv_storage import profile_snapshot, store_cv
 from app.services.discovery import execute_search_run
 from app.services.documents import build_documents, generate_files
-from app.services.job_sources import normalize_job_url
+from app.services.job_sources import normalize_job_url, validate_public_https_url
 from app.services.matcher import score_job
 
 settings = get_settings()
@@ -430,9 +430,11 @@ def recalculate_matches(db: Session = Depends(get_db)):
 @app.get("/api/job-sources/capabilities", dependencies=[Depends(require_session)])
 def job_source_capabilities():
     return [
-        {"kind": "greenhouse", "available": True, "description": "Public Greenhouse Job Board GET API; configure a board token."},
+        {"kind": "greenhouse", "available": True, "description": "Public Greenhouse Job Board GET API; configure the public board slug."},
         {"kind": "lever", "available": True, "description": "Public Lever Postings GET API; configure a company site slug."},
+        {"kind": "ashby", "available": True, "description": "Credential-free Ashby public job postings API; configure the public job board name."},
         {"kind": "rss", "available": True, "description": "Public HTTPS RSS/Atom feeds, including remote job boards and company feeds."},
+        {"kind": "career_page", "available": True, "description": "Fetch one explicitly configured public HTTPS careers URL and import Schema.org JobPosting JSON-LD only; no crawling."},
         {"kind": "manual_url", "available": True, "description": "Paste a job URL and its description; import details from a currently open page with REA."},
         {"kind": "linkedin", "available": False, "description": "No general public search API is configured. Use an authorized LinkedIn interface and manual/REA review; no login scraping."},
         {"kind": "indeed", "available": False, "description": "No permitted public search API is configured. Submit a public job URL manually; no login scraping."},
@@ -446,21 +448,27 @@ def list_job_sources(db: Session = Depends(get_db)):
 
 @app.post("/api/job-sources", response_model=JobSourceRead, status_code=201, dependencies=[Depends(require_csrf)])
 def create_job_source(payload: JobSourceCreate, db: Session = Depends(get_db)):
-    if payload.kind in {"greenhouse", "lever"} and not payload.board_slug:
+    if payload.kind in {"greenhouse", "lever", "ashby"} and not payload.board_slug:
         raise HTTPException(status_code=422, detail="A public job board slug is required")
-    if payload.kind == "rss":
-        if not payload.feed_url:
-            raise HTTPException(status_code=422, detail="An HTTPS feed URL is required")
-        parsed = urlsplit(payload.feed_url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-            raise HTTPException(status_code=422, detail="RSS feeds must use a public HTTPS URL without credentials")
-        if parsed.hostname.casefold() in {"localhost", "localhost.localdomain"}:
-            raise HTTPException(status_code=422, detail="RSS feed host must be public")
-    else:
-        payload = payload.model_copy(update={"feed_url": None})
+    if payload.kind in {"rss", "career_page"}:
+        url = payload.feed_url if payload.kind == "rss" else payload.page_url
+        if not url:
+            label = "feed" if payload.kind == "rss" else "career page"
+            raise HTTPException(status_code=422, detail=f"An HTTPS {label} URL is required")
+        try:
+            validate_public_https_url(url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+    payload = payload.model_copy(update={
+        "board_slug": payload.board_slug if payload.kind in {"greenhouse", "lever", "ashby"} else None,
+        "feed_url": payload.feed_url if payload.kind == "rss" else None,
+        "page_url": payload.page_url if payload.kind == "career_page" else None,
+    })
     query = select(JobSource.id).where(JobSource.kind == payload.kind)
     if payload.kind == "rss":
         query = query.where(JobSource.feed_url == payload.feed_url)
+    elif payload.kind == "career_page":
+        query = query.where(JobSource.page_url == payload.page_url)
     else:
         query = query.where(JobSource.board_slug == payload.board_slug)
     if db.scalar(query):

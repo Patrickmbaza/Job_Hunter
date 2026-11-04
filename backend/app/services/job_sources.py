@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import ipaddress
+import json
 import re
 import socket
 import xml.etree.ElementTree as ET
@@ -31,6 +32,32 @@ class _TextParser(HTMLParser):
         clean = " ".join(data.split())
         if clean:
             self.parts.append(clean)
+
+
+class _JsonLdParser(HTMLParser):
+    """Collect only JSON-LD script bodies from an explicitly configured page."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._capture = False
+        self._parts: list[str] = []
+        self.documents: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        attributes = dict(attrs)
+        self._capture = tag.casefold() == "script" and (attributes.get("type") or "").split(";", 1)[0].strip().casefold() == "application/ld+json"
+        if self._capture:
+            self._parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capture:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._capture and tag.casefold() == "script":
+            self.documents.append("".join(self._parts))
+            self._parts = []
+            self._capture = False
 
 
 def plain_text(value: str | None) -> str:
@@ -120,49 +147,77 @@ def _record(source: JobSource, *, identifier: str | None, title: str, url: str,
             location: str = "", description: str = "", application_url: str | None = None,
             posted_at: datetime | None = None, employment_type: str | None = None,
             salary_min: float | None = None, salary_max: float | None = None,
-            salary_currency: str | None = None) -> dict:
+            salary_currency: str | None = None, company: str | None = None,
+            work_mode: str | None = None, expires_at: datetime | None = None) -> dict:
     url = normalize_job_url(url)
     required, preferred, experience = extract_skills(description)
     return {
-        "title": title[:240], "company": source.name[:240], "location": location[:240] or None,
-        "work_mode": _work_mode(location, description), "description": description[:100_000],
+        "title": title[:240], "company": (company or source.name)[:240], "location": location[:240] or None,
+        "work_mode": work_mode if work_mode in {"remote", "hybrid", "on-site"} else _work_mode(location, description),
         "source_url": url, "application_url": normalize_job_url(application_url) if application_url else url,
         "source_name": f"{source.kind.title()}:{source.id}", "source_identifier": str(identifier)[:256] if identifier else None,
         "employment_type": employment_type[:80] if employment_type else None,
         "salary_min": salary_min, "salary_max": salary_max, "salary_currency": salary_currency,
         "required_skills": required, "preferred_skills": preferred,
-        "experience_requirements": experience, "posted_at": posted_at,
+        "experience_requirements": experience, "posted_at": posted_at, "expires_at": expires_at,
     }
 
 
-async def _get_json(url: str) -> object:
+def validate_public_https_url(url: str) -> str:
+    parts = urlsplit(url.strip())
+    hostname = (parts.hostname or "").casefold().rstrip(".")
+    if parts.scheme.casefold() != "https" or not hostname or parts.username or parts.password:
+        raise ValueError("Public job pages and feeds must use HTTPS without embedded credentials")
+    if hostname == "localhost" or hostname.endswith((".localhost", ".local", ".internal")):
+        raise ValueError("Public job pages and feeds cannot use local hostnames")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        raise ValueError("Public job pages and feeds cannot use private IP addresses")
+    if parts.port not in (None, 443):
+        raise ValueError("Public job pages and feeds must use the standard HTTPS port")
+    return url
+
+
+async def _read_bounded(url: str) -> bytes:
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=False, trust_env=False,
                                  headers={"User-Agent": "PersonalJobHunter/0.1 (local personal job discovery)"}) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        if len(response.content) > MAX_FEED_BYTES:
-            raise ValueError("Job source response exceeded the 5 MB limit")
-        return response.json()
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > MAX_FEED_BYTES:
+                    raise ValueError("Job source response exceeded the 5 MB limit")
+                chunks.append(chunk)
+            return b"".join(chunks)
 
 
-async def _safe_rss_bytes(url: str) -> bytes:
+async def _get_json(url: str) -> object:
+    try:
+        return json.loads(await _read_bounded(url))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("Job source returned invalid JSON") from None
+
+
+async def _safe_public_https_bytes(url: str) -> bytes:
+    validate_public_https_url(url)
     parts = urlsplit(url)
-    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
-        raise ValueError("RSS feeds must use a public HTTPS URL")
     try:
         resolved = await asyncio.to_thread(socket.getaddrinfo, parts.hostname, parts.port or 443, type=socket.SOCK_STREAM)
     except OSError:
-        raise ValueError("RSS feed hostname could not be resolved") from None
+        raise ValueError("Public job source hostname could not be resolved") from None
     addresses = {item[4][0] for item in resolved}
     if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
-        raise ValueError("RSS feed host must resolve only to public IP addresses")
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, follow_redirects=False, trust_env=False,
-                                 headers={"User-Agent": "PersonalJobHunter/0.1 (local personal job discovery)"}) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        if len(response.content) > MAX_FEED_BYTES:
-            raise ValueError("RSS feed exceeded the 5 MB limit")
-        return response.content
+        raise ValueError("Public job source must resolve only to public IP addresses")
+    return await _read_bounded(url)
+
+
+async def _safe_rss_bytes(url: str) -> bytes:
+    return await _safe_public_https_bytes(url)
 
 
 def _greenhouse_items(payload: object, source: JobSource) -> list[dict]:
@@ -201,6 +256,142 @@ def _lever_items(payload: object, source: JobSource) -> list[dict]:
             salary_currency=salary.get("currency"),
         ))
     return items
+
+
+def _ashby_items(payload: object, source: JobSource) -> list[dict]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
+        raise ValueError("Ashby returned an unexpected public job board response")
+    items = []
+    for item in payload["jobs"]:
+        if not isinstance(item, dict) or item.get("isListed") is False:
+            continue
+        title, url = item.get("title"), item.get("jobUrl")
+        if not isinstance(title, str) or not isinstance(url, str):
+            continue
+        locations = [item.get("location", "")]
+        secondary = item.get("secondaryLocations")
+        if isinstance(secondary, list):
+            locations.extend(place.get("location", "") for place in secondary if isinstance(place, dict))
+        location = ", ".join(dict.fromkeys(place.strip() for place in locations if isinstance(place, str) and place.strip()))
+        mode_value = str(item.get("workplaceType", "")).casefold()
+        work_mode = {"remote": "remote", "hybrid": "hybrid", "onsite": "on-site", "on-site": "on-site"}.get(mode_value)
+        description = item.get("descriptionPlain") or plain_text(item.get("descriptionHtml"))
+        salary_min = salary_max = None
+        salary_currency = None
+        compensation = item.get("compensation") if isinstance(item.get("compensation"), dict) else {}
+        components = compensation.get("summaryComponents") or []
+        if not components:
+            for tier in compensation.get("compensationTiers", []) if isinstance(compensation.get("compensationTiers"), list) else []:
+                if isinstance(tier, dict) and isinstance(tier.get("components"), list):
+                    components.extend(tier["components"])
+        salary = next((part for part in components if isinstance(part, dict) and str(part.get("compensationType", "")).casefold() == "salary"), None)
+        if salary:
+            salary_min = _as_float(salary.get("minValue"))
+            salary_max = _as_float(salary.get("maxValue"))
+            salary_currency = salary.get("currencyCode")
+        items.append(_record(
+            source, identifier=item.get("id"), title=title, url=url,
+            application_url=item.get("applyUrl") or url, location=location,
+            description=description if isinstance(description, str) else "",
+            posted_at=_date(item.get("publishedAt")), employment_type=item.get("employmentType"),
+            salary_min=salary_min, salary_max=salary_max, salary_currency=salary_currency,
+            work_mode=work_mode,
+        ))
+    return items
+
+
+def _walk_job_postings(value: object, depth: int = 0):
+    if depth > 12:
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _walk_job_postings(item, depth + 1)
+    elif isinstance(value, dict):
+        types = value.get("@type", [])
+        types = [types] if isinstance(types, str) else types if isinstance(types, list) else []
+        if any(str(kind).rsplit("/", 1)[-1].casefold() == "jobposting" for kind in types):
+            yield value
+        else:
+            for key in ("@graph", "mainEntity", "itemListElement", "hasPart", "@included"):
+                if key in value:
+                    yield from _walk_job_postings(value[key], depth + 1)
+
+
+def _jsonld_documents(raw: bytes) -> list[object]:
+    parser = _JsonLdParser()
+    try:
+        parser.feed(raw.decode("utf-8", errors="replace"))
+    except Exception:
+        raise ValueError("Career page HTML could not be parsed") from None
+    documents = []
+    for script in parser.documents:
+        try:
+            documents.append(json.loads(script))
+        except json.JSONDecodeError:
+            continue
+    return documents
+
+
+def _schema_locations(value: object) -> str:
+    if not isinstance(value, list):
+        value = [value]
+    found = []
+    for place in value:
+        if not isinstance(place, dict):
+            continue
+        name = place.get("name")
+        address = place.get("address")
+        if isinstance(address, dict):
+            postal = address.get("address") if isinstance(address.get("address"), dict) else address
+            pieces = [postal.get(key) for key in ("addressLocality", "addressRegion", "addressCountry")]
+            formatted = ", ".join(dict.fromkeys(str(part).strip() for part in pieces if isinstance(part, str) and part.strip()))
+            name = name or formatted
+        if isinstance(name, str) and name.strip() and name.strip() not in found:
+            found.append(name.strip())
+    return ", ".join(found)
+
+
+def _jsonld_job_items(documents: list[object], source: JobSource) -> list[dict]:
+    items = []
+    for document in documents:
+        for posting in _walk_job_postings(document):
+            title, url = posting.get("title"), posting.get("url")
+            if not isinstance(title, str) or not isinstance(url, str):
+                continue
+            hiring_org = posting.get("hiringOrganization")
+            company = hiring_org.get("name") if isinstance(hiring_org, dict) else None
+            identifier = posting.get("identifier")
+            if isinstance(identifier, dict):
+                identifier = identifier.get("value")
+            salary_min = salary_max = None
+            salary_currency = None
+            salary = posting.get("baseSalary")
+            if isinstance(salary, dict):
+                salary_currency = salary.get("currency")
+                value = salary.get("value")
+                if isinstance(value, dict):
+                    salary_min = _as_float(value.get("minValue") or value.get("value"))
+                    salary_max = _as_float(value.get("maxValue") or value.get("value"))
+                else:
+                    salary_min = salary_max = _as_float(value)
+            mode = "remote" if str(posting.get("jobLocationType", "")).casefold() in {"telecommute", "remote"} else None
+            employment = posting.get("employmentType")
+            if isinstance(employment, list):
+                employment = ", ".join(str(item) for item in employment if item)
+            items.append(_record(
+                source, identifier=str(identifier) if identifier is not None else None,
+                title=title, url=url, application_url=url,
+                location=_schema_locations(posting.get("jobLocation")),
+                description=plain_text(posting.get("description") if isinstance(posting.get("description"), str) else ""),
+                posted_at=_date(posting.get("datePosted")), expires_at=_date(posting.get("validThrough")),
+                employment_type=employment, salary_min=salary_min, salary_max=salary_max,
+                salary_currency=salary_currency, company=company, work_mode=mode,
+            ))
+    return items
+
+
+def _career_page_items(raw: bytes, source: JobSource) -> list[dict]:
+    return _jsonld_job_items(_jsonld_documents(raw), source)
 
 
 def _as_float(value) -> float | None:
@@ -248,7 +439,13 @@ async def fetch_source(source: JobSource) -> list[dict]:
     if source.kind == "lever":
         payload = await _get_json(f"https://api.lever.co/v0/postings/{slug}?mode=json")
         return _lever_items(payload, source)
+    if source.kind == "ashby":
+        payload = await _get_json(f"https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true")
+        return _ashby_items(payload, source)
     if source.kind == "rss" and source.feed_url:
         raw = await _safe_rss_bytes(source.feed_url)
         return _rss_items(raw, source)
+    if source.kind == "career_page" and source.page_url:
+        raw = await _safe_public_https_bytes(source.page_url)
+        return _career_page_items(raw, source)
     raise ValueError(f"Unsupported configured job source type: {source.kind}")

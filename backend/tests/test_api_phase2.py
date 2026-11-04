@@ -184,6 +184,12 @@ def test_cv_upload_profile_job_filter_application_and_document_workflow(api_clie
     monkeypatch.setattr(main, "execute_search_run", complete_search)
     source = client.post("/api/job-sources", json={"name": "Example board", "kind": "greenhouse", "board_slug": "example"}, headers=headers)
     assert source.status_code == 201
+    ashby = client.post("/api/job-sources", json={"name": "Ashby board", "kind": "ashby", "board_slug": "example-ashby"}, headers=headers)
+    assert ashby.status_code == 201 and ashby.json()["page_url"] is None
+    career = client.post("/api/job-sources", json={"name": "Company careers", "kind": "career_page", "page_url": "https://careers.example.org/jobs"}, headers=headers)
+    assert career.status_code == 201 and career.json()["page_url"] == "https://careers.example.org/jobs"
+    assert client.post("/api/job-sources", json={"name": "Duplicate career page", "kind": "career_page", "page_url": "https://careers.example.org/jobs"}, headers=headers).status_code == 409
+    assert client.post("/api/job-sources", json={"name": "Unsafe page", "kind": "career_page", "page_url": "http://127.0.0.1/jobs"}, headers=headers).status_code == 422
     queued = client.post("/api/job-searches", json={"keywords": ["DevOps"], "locations": ["Nigeria"], "source_ids": [source.json()["id"]]}, headers=headers)
     assert queued.status_code == 202
     run_id = queued.json()["runs"][0]["id"]

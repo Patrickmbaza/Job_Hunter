@@ -8,7 +8,7 @@ Structured profile arrays are editable as JSON in the current form. Originals ar
 
 ## Discover jobs
 
-Under **Find jobs**, configure public Greenhouse board slug, Lever company slug, or HTTPS RSS/Atom feed. Enter keywords/locations and run a local search. Runs store per-source outcomes. Alternatively paste a public job URL and description. LinkedIn/Indeed have no public search adapter here; no login scraping or protections bypass. REA supports passive inspection only for an already-open allow-listed page.
+Under **Find jobs**, configure a public Greenhouse board slug, Lever company slug, Ashby board name, HTTPS RSS/Atom feed, or a single public HTTPS company careers URL. The career-page option imports only Schema.org JobPosting JSON-LD published in that page; it does not crawl other URLs. Enter keywords/locations and run a local search. Runs store per-source outcomes. Alternatively paste a public job URL and description. LinkedIn/Indeed have no permitted public search adapter here; use manual URLs, with no login scraping or protections bypass. REA supports passive inspection only for an already-open allow-listed page.
 
 **Matched jobs** lets you filter by title/company and minimum score, inspect match factors, missing skills and description, and save an opportunity. Score is an internal estimate, not an employer ATS result.
 

@@ -1,12 +1,12 @@
 # Personal AI Job Hunter
 
-Private, local-first job search software for one user. Phase 2 adds local PDF/DOCX CV import and review, public Greenhouse/Lever/RSS discovery, manual job URLs, deterministic explainable matching, application document generation, and an application tracker. It uses no paid AI or cloud services.
+Private, local-first job search software for one user. Phase 2 adds local PDF/DOCX CV import and review, public Greenhouse/Lever/Ashby/RSS discovery, explicitly configured company career pages publishing Schema.org JobPosting JSON-LD, manual job URLs, deterministic explainable matching, application document generation, and an application tracker. It uses no paid AI or cloud services.
 
 ## Current capabilities and limits
 
 - CV originals are retained locally; parser output is an editable, explicitly unverified draft. The parser handles selectable PDF text and DOCX text, not OCR.
 - Profile details and profile snapshots are stored in SQLite. Documents can only be generated after the profile is marked verified.
-- Searches can be started manually against configured public Greenhouse and Lever boards or HTTPS RSS/Atom feeds. Job URLs/descriptions can also be added manually.
+- Searches can be started manually against configured public Greenhouse, Lever and Ashby boards, HTTPS RSS/Atom feeds, and one explicitly configured public company careers URL when it publishes JobPosting JSON-LD. Career pages are not crawled. Job URLs/descriptions can also be added manually.
 - LinkedIn and Indeed have no general public search adapter configured. This app does not scrape logged-in pages. Public listings can be added by URL or inspected through the existing read-only REA connection when the page is already open and allow-listed.
 - Matching is a deterministic internal estimate, not an employer ATS score. No application submission, recruiter message, or email sending route exists.
 - The dashboard is a local single-user app. The connected REA bridge uses the existing Codex MCP configuration and only its reviewed passive inspection tools.
@@ -69,4 +69,5 @@ Install backend requirements into `.venv` for normal use; the `/tmp` path above 
 
 - Greenhouse public job board API: <https://docs.greenhouse.io/job-board.html>
 - Lever public postings API: <https://github.com/lever/postings-api>
+- Ashby public job postings API: <https://developers.ashbyhq.com/docs/public-job-posting-api>
 - Details, setup, privacy and limitations: [USER_GUIDE.md](USER_GUIDE.md), [ARCHITECTURE.md](ARCHITECTURE.md), [REA_INTEGRATION.md](REA_INTEGRATION.md), [SECURITY.md](SECURITY.md), [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
